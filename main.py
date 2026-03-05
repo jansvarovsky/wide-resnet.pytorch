@@ -17,7 +17,6 @@ import argparse
 import datetime
 
 from networks import *
-from torch.autograd import Variable
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR-10 Training')
 parser.add_argument('--lr', default=0.1, type=float, help='learning_rate')
@@ -30,8 +29,18 @@ parser.add_argument('--resume', '-r', action='store_true', help='resume from che
 parser.add_argument('--testOnly', '-t', action='store_true', help='Test mode with the saved model')
 args = parser.parse_args()
 
-# Hyper Parameter settings
-use_cuda = torch.cuda.is_available()
+# Device selection: MPS > CUDA > CPU
+if torch.backends.mps.is_available():
+    device = torch.device('mps')
+    print('| Using MPS (Apple Silicon GPU)')
+elif torch.cuda.is_available():
+    device = torch.device('cuda')
+    print('| Using CUDA GPU')
+    cudnn.benchmark = True
+else:
+    device = torch.device('cpu')
+    print('| Using CPU')
+
 best_acc = 0
 start_epoch, num_epochs, batch_size, optim_type = cf.start_epoch, cf.num_epochs, cf.batch_size, cf.optim_type
 
@@ -53,17 +62,20 @@ if(args.dataset == 'cifar10'):
     print("| Preparing CIFAR-10 dataset...")
     sys.stdout.write("| ")
     trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
-    testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=False, transform=transform_test)
+    testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
     num_classes = 10
 elif(args.dataset == 'cifar100'):
     print("| Preparing CIFAR-100 dataset...")
     sys.stdout.write("| ")
     trainset = torchvision.datasets.CIFAR100(root='./data', train=True, download=True, transform=transform_train)
-    testset = torchvision.datasets.CIFAR100(root='./data', train=False, download=False, transform=transform_test)
+    testset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform_test)
     num_classes = 100
 
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=2)
-testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
+# macOS uses 'spawn' for multiprocessing, which conflicts with top-level script code;
+# use num_workers=0 there and the default 2 elsewhere.
+num_workers = 0 if sys.platform == 'darwin' else 2
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=num_workers)
 
 # Return network & file name
 def getNetwork(args):
@@ -90,25 +102,20 @@ if (args.testOnly):
     print('\n[Test Phase] : Model setup')
     assert os.path.isdir('checkpoint'), 'Error: No checkpoint directory found!'
     _, file_name = getNetwork(args)
-    checkpoint = torch.load('./checkpoint/'+args.dataset+os.sep+file_name+'.t7')
+    checkpoint = torch.load('./checkpoint/'+args.dataset+os.sep+file_name+'.t7', weights_only=False)
     net = checkpoint['net']
 
-    if use_cuda:
-        net.cuda()
+    net.to(device)
+    if device.type == 'cuda':
         net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
-        cudnn.benchmark = True
-
     net.eval()
-    net.training = False
     test_loss = 0
     correct = 0
     total = 0
 
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
-            if use_cuda:
-                inputs, targets = inputs.cuda(), targets.cuda()
-            inputs, targets = Variable(inputs), Variable(targets)
+            inputs, targets = inputs.to(device), targets.to(device)
             outputs = net(inputs)
 
             _, predicted = torch.max(outputs.data, 1)
@@ -127,7 +134,7 @@ if args.resume:
     print('| Resuming from checkpoint...')
     assert os.path.isdir('checkpoint'), 'Error: No checkpoint directory found!'
     _, file_name = getNetwork(args)
-    checkpoint = torch.load('./checkpoint/'+args.dataset+os.sep+file_name+'.t7')
+    checkpoint = torch.load('./checkpoint/'+args.dataset+os.sep+file_name+'.t7', weights_only=False)
     net = checkpoint['net']
     best_acc = checkpoint['acc']
     start_epoch = checkpoint['epoch']
@@ -136,17 +143,15 @@ else:
     net, file_name = getNetwork(args)
     net.apply(conv_init)
 
-if use_cuda:
-    net.cuda()
+net.to(device)
+if device.type == 'cuda':
     net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
-    cudnn.benchmark = True
 
 criterion = nn.CrossEntropyLoss()
 
 # Training
 def train(epoch):
     net.train()
-    net.training = True
     train_loss = 0
     correct = 0
     total = 0
@@ -154,10 +159,8 @@ def train(epoch):
 
     print('\n=> Training Epoch #%d, LR=%.4f' %(epoch, cf.learning_rate(args.lr, epoch)))
     for batch_idx, (inputs, targets) in enumerate(trainloader):
-        if use_cuda:
-            inputs, targets = inputs.cuda(), targets.cuda() # GPU settings
+        inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
-        inputs, targets = Variable(inputs), Variable(targets)
         outputs = net(inputs)               # Forward Propagation
         loss = criterion(outputs, targets)  # Loss
         loss.backward()  # Backward Propagation
@@ -177,15 +180,12 @@ def train(epoch):
 def test(epoch):
     global best_acc
     net.eval()
-    net.training = False
     test_loss = 0
     correct = 0
     total = 0
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
-            if use_cuda:
-                inputs, targets = inputs.cuda(), targets.cuda()
-            inputs, targets = Variable(inputs), Variable(targets)
+            inputs, targets = inputs.to(device), targets.to(device)
             outputs = net(inputs)
             loss = criterion(outputs, targets)
 
@@ -201,7 +201,7 @@ def test(epoch):
         if acc > best_acc:
             print('| Saving Best model...\t\t\tTop1 = %.2f%%' %(acc))
             state = {
-                    'net':net.module if use_cuda else net,
+                    'net':net.module if device.type == 'cuda' else net,
                     'acc':acc,
                     'epoch':epoch,
             }

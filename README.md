@@ -18,6 +18,16 @@ pip install torchvision
 git clone https://github.com/meliketoy/wide-resnet.pytorch
 ```
 
+## Apple Silicon (MPS) support
+The code runs on Apple Silicon Macs via PyTorch's MPS backend. The device is selected automatically (MPS > CUDA > CPU).
+
+```bash
+pip install torch torchvision   # PyTorch 2.x with MPS support built in
+python main.py --net_type wide-resnet --depth 28 --widen_factor 10 --dropout 0.3 --dataset cifar10
+```
+
+Note: MPS does not support `DataParallel` or `torch.compile`, and `num_workers` is set to 0 on macOS due to its multiprocessing `spawn` context.
+
 ## How to run
 After you have cloned the repository, you can train each dataset of either cifar10, cifar100 by running the script below.
 ```bash
