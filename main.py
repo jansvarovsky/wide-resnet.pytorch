@@ -145,6 +145,7 @@ else:
 
 net.to(device)
 if device.type == 'cuda':
+    # Only apply DataParallel on cuda; not supported on MPS.
     net = torch.nn.DataParallel(net, device_ids=range(torch.cuda.device_count()))
 
 criterion = nn.CrossEntropyLoss()
@@ -201,7 +202,7 @@ def test(epoch):
         if acc > best_acc:
             print('| Saving Best model...\t\t\tTop1 = %.2f%%' %(acc))
             state = {
-                    'net':net.module if device.type == 'cuda' else net,
+                    'net':net.module if device.type == 'cuda' else net,  # Unwrap because of the DataParallel net
                     'acc':acc,
                     'epoch':epoch,
             }
